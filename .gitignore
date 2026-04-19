@@ -1,0 +1,55 @@
+# ========= 系统/编辑器 =========
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ========= Python =========
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+.pytest_cache/
+*.egg-info/
+
+# ========= PyInstaller =========
+build/
+dist/
+*.spec.bak
+*.manifest
+
+# ========= Streamlit =========
+.streamlit/secrets.toml
+
+# ========= 运行产物（核对结果、测试数据） =========
+jieguo*.xlsx
+aggregate_custom*.xlsx
+*.tmp.xlsx
+*_原值.xlsx
+
+# ========= 敏感数据（切勿提交真实学生/员工信息） =========
+huizong.XLSX
+xuesheng.xlsx
+jiaoshi.xlsx
+3yuequanbu.XLSX
+3.xlsx
+tui.xlsx
+daikou.xls
+daikou0.xls
+# 兜底：根目录下任何非 README 的 Excel 都排除
+/*.xlsx
+/*.XLSX
+/*.xls
+
+# ========= 日志 =========
+*.log
