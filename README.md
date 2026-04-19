@@ -62,12 +62,12 @@
 
 ## ⬇ 下载与使用
 
-到 **[📦 Releases 页面](https://github.com/jiushinaozhewan/shujuduibi/releases)** 下载最新版 zip：
+到 **[📦 Releases 页面](https://github.com/jiushinaozhewan/shujuduibi/releases/latest)** 下载最新版：
 
-| 下载 | 适用 | 操作 |
-|---|---|---|
-| `跨表核对.zip` | 桌面版 | 解压 → 双击 `跨表核对.exe` |
-| `跨表核对Web.zip` | Web 版 | 解压 → 双击 `跨表核对Web.exe` → 浏览器自动打开 |
+| 下载 | 大小 | 适用 | 操作 |
+|---|---|---|---|
+| **[kuabiao-desktop-v1.0.0.zip](https://github.com/jiushinaozhewan/shujuduibi/releases/download/v1.0.0/kuabiao-desktop-v1.0.0.zip)** | 98 MB | 🖥 桌面版 **（推荐）** | 解压 → 双击 `跨表核对.exe` |
+| [kuabiao-web-v1.0.0.zip](https://github.com/jiushinaozhewan/shujuduibi/releases/download/v1.0.0/kuabiao-web-v1.0.0.zip) | 137 MB | 🌐 Web 版 | 解压 → 双击 `跨表核对Web.exe` → 浏览器自动打开 |
 
 > ⚠️ `_internal` 文件夹必须与 exe 保持同目录，不能单独移动 exe。
 
