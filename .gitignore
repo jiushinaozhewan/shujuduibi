@@ -25,6 +25,8 @@ venv.bak/
 # ========= PyInstaller =========
 build/
 dist/
+build_release/
+dist_release/
 *.spec.bak
 *.manifest
 

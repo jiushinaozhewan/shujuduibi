@@ -1,7 +1,7 @@
 """Web 版 · 跨表核对 (Streamlit)
-功能与桌面版完全一致：
+功能与桌面版一致：
   ① 自定义分组聚合
-  ② 跨表查询及核对（含 核对 / 查询 两种模式）
+  ② 跨表查询及核对（支持多参考表、多目标数据，含 核对 / 查询 两种模式）
   ③ 带运算核对指定列
 """
 from __future__ import annotations
@@ -149,6 +149,343 @@ def suggest_agg(col_name: str, series: pd.Series) -> int:
     return 0
 
 
+def table_letter(index: int) -> str:
+    """0 -> A, 1 -> B ... 26 -> AA"""
+    s = ""
+    index += 1
+    while index:
+        index, r = divmod(index - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def init_cross_table_state():
+    st.session_state.setdefault("ck_a_target_count", 1)
+    st.session_state.setdefault("ck_ref_ids", [1])
+    st.session_state.setdefault("ck_next_ref_id", 2)
+    for ref_id in st.session_state.ck_ref_ids:
+        st.session_state.setdefault(f"ck_ref_targets_{ref_id}", [1])
+    sync_ref_target_limits()
+
+
+def sync_ref_target_limits():
+    base_count = max(1, int(st.session_state.get("ck_a_target_count", 1)))
+    st.session_state.ck_a_target_count = base_count
+    used: set[int] = set()
+    for ref_id in list(st.session_state.get("ck_ref_ids", [])):
+        key = f"ck_ref_targets_{ref_id}"
+        cleaned = []
+        for target_no in st.session_state.get(key, []):
+            try:
+                target_no = int(target_no)
+            except Exception:
+                continue
+            if 1 <= target_no <= base_count and target_no not in used and target_no not in cleaned:
+                cleaned.append(target_no)
+                used.add(target_no)
+        st.session_state[key] = cleaned
+
+
+def used_ref_targets(exclude_ref_id: int | None = None) -> set[int]:
+    used: set[int] = set()
+    for ref_id in st.session_state.get("ck_ref_ids", []):
+        if ref_id == exclude_ref_id:
+            continue
+        used.update(int(x) for x in st.session_state.get(f"ck_ref_targets_{ref_id}", []))
+    return used
+
+
+def first_available_ref_target(exclude_ref_id: int | None = None) -> int | None:
+    base_count = int(st.session_state.get("ck_a_target_count", 1))
+    used = used_ref_targets(exclude_ref_id)
+    current = set()
+    if exclude_ref_id is not None:
+        current = set(int(x) for x in st.session_state.get(f"ck_ref_targets_{exclude_ref_id}", []))
+    for target_no in range(1, base_count + 1):
+        if target_no not in used and target_no not in current:
+            return target_no
+    return None
+
+
+def add_reference_table():
+    sync_ref_target_limits()
+    target_no = first_available_ref_target()
+    if target_no is None:
+        st.session_state.ck_notice = "没有可分配的目标数据：请先在 A 表增加目标数据，或删除其他参考表中的目标数据。"
+        return
+    ref_id = int(st.session_state.get("ck_next_ref_id", 1))
+    st.session_state.ck_next_ref_id = ref_id + 1
+    st.session_state.ck_ref_ids.append(ref_id)
+    st.session_state[f"ck_ref_targets_{ref_id}"] = [target_no]
+
+
+def remove_reference_table(ref_id: int):
+    if len(st.session_state.get("ck_ref_ids", [])) <= 1:
+        st.session_state.ck_notice = "至少保留一个参考表。"
+        return
+    st.session_state.ck_ref_ids = [x for x in st.session_state.ck_ref_ids if x != ref_id]
+    st.session_state.pop(f"ck_ref_targets_{ref_id}", None)
+
+
+def add_a_target():
+    st.session_state.ck_a_target_count = int(st.session_state.get("ck_a_target_count", 1)) + 1
+
+
+def remove_a_target():
+    count = int(st.session_state.get("ck_a_target_count", 1))
+    if count <= 1:
+        st.session_state.ck_notice = "A 表至少保留一组目标数据。"
+        return
+    st.session_state.ck_a_target_count = count - 1
+    sync_ref_target_limits()
+
+
+def add_ref_target(ref_id: int):
+    target_no = first_available_ref_target(exclude_ref_id=ref_id)
+    if target_no is None:
+        st.session_state.ck_notice = "该参考表不能再添加目标数据：A 表目标数据数量已达上限，或编号已被其他参考表占用。"
+        return
+    st.session_state.setdefault(f"ck_ref_targets_{ref_id}", []).append(target_no)
+
+
+def remove_ref_target(ref_id: int, index: int):
+    key = f"ck_ref_targets_{ref_id}"
+    targets = list(st.session_state.get(key, []))
+    if 0 <= index < len(targets):
+        targets.pop(index)
+    st.session_state[key] = targets
+
+
+def validate_targets(kA: str, a_pairs: list[tuple[int, str]], ref_label: str,
+                     kR: str, r_pairs: list[tuple[int, str]], *, lookup: bool = False):
+    valsA = [v for _, v in a_pairs]
+    valsR = [v for _, v in r_pairs]
+    target_map = {target_no: v for target_no, v in a_pairs}
+    if not kA or not kR or not valsA or not valsR or any(not v for v in valsA + valsR):
+        return None, "请确认关联相同字段和目标数据都已选择。"
+    if len(target_map) != len(a_pairs):
+        return None, "A 表目标数据编号不能重复。"
+    ref_numbers = [target_no for target_no, _ in r_pairs]
+    if len(set(ref_numbers)) != len(ref_numbers):
+        return None, f"{ref_label} 表目标数据编号不能重复。"
+    missing_numbers = [target_no for target_no in ref_numbers if target_no not in target_map]
+    if missing_numbers:
+        return None, f"{ref_label} 表包含 A 表不存在的目标数据编号：{missing_numbers}"
+    if lookup and len(set(valsA)) != len(valsA):
+        return None, "查询模式下 A 表目标数据不能重复，否则回填列会冲突。"
+    return [(target_no, target_map[target_no], val) for target_no, val in r_pairs], None
+
+
+def validate_reference_allocations(refs: list[tuple[str, pd.DataFrame, str, list[tuple[int, str]], str]]):
+    owners: dict[int, list[str]] = {}
+    for ref_label, _, _, r_pairs, _ in refs:
+        for target_no, _ in r_pairs:
+            owners.setdefault(target_no, []).append(ref_label)
+    duplicates = {target_no: labels for target_no, labels in owners.items() if len(labels) > 1}
+    if duplicates:
+        detail = "；".join(f"目标数据{target_no}: {','.join(labels)}" for target_no, labels in duplicates.items())
+        return f"多个参考表不能占用同一个目标数据编号：{detail}"
+    return None
+
+
+def build_cross_check_results(dfA: pd.DataFrame, kA: str, a_pairs: list[tuple[int, str]], aggA: str,
+                              refs: list[tuple[str, pd.DataFrame, str, list[tuple[int, str]], str]],
+                              tol: float, norm: bool):
+    allocation_error = validate_reference_allocations(refs)
+    if allocation_error:
+        return None, None, None, allocation_error
+
+    A = dfA[dfA[kA].notna()].copy()
+    A["__k"] = A[kA].map(norm_id) if norm else A[kA]
+    full_parts = []
+    summary_rows = [("全部", "参考表数量", len(refs)), ("全部", "A表行数", len(A))]
+
+    for ref_label, dfR, kR, r_pairs, aggR in refs:
+        target_pairs, error = validate_targets(kA, a_pairs, ref_label, kR, r_pairs)
+        if error:
+            return None, None, None, error
+        R = dfR[dfR[kR].notna()].copy()
+        R["__k"] = R[kR].map(norm_id) if norm else R[kR]
+        agg_a = {}
+        agg_r = {}
+        diff_cols = []
+        target_labels = {}
+        for target_no, vA, vR in target_pairs:
+            a_src = f"__vA_{target_no}"
+            r_src = f"__vR_{target_no}"
+            a_col = f"目标数据{target_no}-A值"
+            r_col = f"目标数据{target_no}-{ref_label}值"
+            diff_col = f"目标数据{target_no}-差额(A-{ref_label})"
+            A[a_src] = A[vA].map(to_num)
+            R[r_src] = R[vR].map(to_num)
+            agg_a[a_col] = (a_src, aggA)
+            agg_r[r_col] = (r_src, aggR)
+            diff_cols.append((target_no, a_col, r_col, diff_col, vA, vR))
+            target_labels[diff_col] = f"目标数据{target_no}"
+        Ag = A.groupby("__k", as_index=False).agg(**agg_a)
+        Rg = R.groupby("__k", as_index=False).agg(**agg_r)
+        merged = Ag.merge(Rg, on="__k", how="outer", indicator=True)
+        for _, a_col, r_col, diff_col, _, _ in diff_cols:
+            merged[a_col] = merged[a_col].fillna(0).round(2)
+            merged[r_col] = merged[r_col].fillna(0).round(2)
+            merged[diff_col] = (merged[a_col] - merged[r_col]).round(2)
+
+        def cls(row):
+            if row["_merge"] == "left_only":
+                return "仅A有"
+            if row["_merge"] == "right_only":
+                return f"仅{ref_label}有(A遗漏)"
+            return "一致" if all(abs(row[diff_col]) <= tol for _, _, _, diff_col, _, _ in diff_cols) else "金额不一致"
+
+        merged["核对状态"] = merged.apply(cls, axis=1)
+        merged["不一致目标"] = merged.apply(
+            lambda row: "" if row["核对状态"] != "金额不一致" else "、".join(
+                target_labels[diff_col] for _, _, _, diff_col, _, _ in diff_cols if abs(row[diff_col]) > tol
+            ),
+            axis=1,
+        )
+        merged = merged.drop(columns=["_merge"]).rename(columns={"__k": "键值"})
+        merged.insert(0, "参考表", ref_label)
+        full_parts.append(merged)
+
+        cnt = merged["核对状态"].value_counts().to_dict()
+        summary_rows.extend([
+            (ref_label, "目标数据组数", len(target_pairs)),
+            (ref_label, "合集", len(merged)),
+            (ref_label, "一致", cnt.get("一致", 0)),
+            (ref_label, "金额不一致", cnt.get("金额不一致", 0)),
+            (ref_label, "仅A有", cnt.get("仅A有", 0)),
+            (ref_label, f"仅{ref_label}有(A遗漏)", cnt.get(f"仅{ref_label}有(A遗漏)", 0)),
+            (ref_label, f"A表({aggA})行数", len(A)),
+            (ref_label, f"{ref_label}表({aggR})行数", len(R)),
+        ])
+        for target_no, a_col, r_col, diff_col, vA, vR in diff_cols:
+            summary_rows.extend([
+                (ref_label, f"目标数据{target_no} A列", vA),
+                (ref_label, f"目标数据{target_no} {ref_label}列", vR),
+                (ref_label, f"目标数据{target_no} A合计", round(merged[a_col].sum(), 2)),
+                (ref_label, f"目标数据{target_no} {ref_label}合计", round(merged[r_col].sum(), 2)),
+                (ref_label, f"目标数据{target_no} 差额合计", round(merged[diff_col].sum(), 2)),
+            ])
+
+    full = pd.concat(full_parts, ignore_index=True) if full_parts else pd.DataFrame()
+    summary = pd.DataFrame(summary_rows, columns=["参考表", "指标", "值"])
+    diff = full[full["核对状态"] != "一致"].reset_index(drop=True)
+    return summary, diff, full, None
+
+
+def build_cross_lookup_results(dfA: pd.DataFrame, kA: str, a_pairs: list[tuple[int, str]],
+                               refs: list[tuple[str, pd.DataFrame, str, list[tuple[int, str]], str]],
+                               norm: bool):
+    allocation_error = validate_reference_allocations(refs)
+    if allocation_error:
+        return None, None, allocation_error
+
+    A = dfA.copy()
+    A["__k"] = A[kA].map(norm_id) if norm else A[kA]
+    valsA = [v for _, v in a_pairs]
+    if len(set(valsA)) != len(valsA):
+        return None, None, "查询模式下 A 表目标数据不能重复，否则回填列会冲突。"
+
+    merged = A.copy()
+    pair_meta_by_target: dict[int, list[tuple[str, str, str, str]]] = {}
+    source_cols = []
+    record_cols = []
+    ref_match_rows = []
+
+    for ref_label, dfR, kR, r_pairs, aggR in refs:
+        target_pairs, error = validate_targets(kA, a_pairs, ref_label, kR, r_pairs, lookup=True)
+        if error:
+            return None, None, error
+        R = dfR[dfR[kR].notna()].copy()
+        R["__k"] = R[kR].map(norm_id) if norm else R[kR]
+        record_col = f"__{ref_label}来源记录数"
+        agg_spec = {record_col: ("__k", "count")}
+        for target_no, vA, vR in target_pairs:
+            value_col = f"__{ref_label}查询值{target_no}"
+            source_col = f"__{ref_label}来源数据值{target_no}"
+            R[value_col] = R[vR].map(to_num)
+            agg_spec[value_col] = (value_col, aggR)
+            agg_spec[source_col] = (vR, list_vals)
+            pair_meta_by_target.setdefault(target_no, []).append((ref_label, vR, value_col, source_col))
+            source_cols.append((ref_label, target_no, source_col))
+        Rg = R.groupby("__k", as_index=False).agg(**agg_spec)
+        merged = merged.merge(Rg, on="__k", how="left")
+        record_cols.append((ref_label, record_col))
+        ref_match_rows.append((ref_label, aggR, kR, record_col))
+
+    def matched_refs(row):
+        names = [
+            ref_label for ref_label, record_col in record_cols
+            if pd.notna(row[record_col]) and row[record_col] > 0
+        ]
+        return "、".join(names)
+
+    merged["匹配参考表"] = merged.apply(matched_refs, axis=1)
+    merged["匹配状态"] = merged["匹配参考表"].apply(lambda x: "未匹配" if not x else "已匹配")
+
+    orig_cols = []
+    for target_no, vA in a_pairs:
+        orig_col = f"{vA}_原值" if len(a_pairs) == 1 else f"{vA}_原值(目标数据{target_no})"
+        merged[orig_col] = merged[vA]
+        fill_values = None
+        for _, _, value_col, _ in pair_meta_by_target.get(target_no, []):
+            fill_values = merged[value_col] if fill_values is None else fill_values.combine_first(merged[value_col])
+        if fill_values is not None:
+            merged[vA] = fill_values.where(fill_values.notna(), merged[orig_col])
+        orig_cols.append(orig_col)
+
+    source_out_cols = []
+    rename_cols = {}
+    for ref_label, target_no, source_col in source_cols:
+        out_source_col = f"{ref_label}_来源数据值" if len(a_pairs) == 1 else f"{ref_label}_来源数据值(目标数据{target_no})"
+        source_out_cols.append(source_col)
+        rename_cols[source_col] = out_source_col
+    record_out_cols = []
+    for ref_label, record_col in record_cols:
+        record_out_cols.append(record_col)
+        rename_cols[record_col] = f"{ref_label}_来源记录数"
+    out_cols = (
+        [c for c in A.columns if c != "__k"]
+        + orig_cols
+        + source_out_cols
+        + record_out_cols
+        + ["匹配参考表", "匹配状态"]
+    )
+    out = merged[out_cols].rename(columns=rename_cols)
+    for vA in valsA:
+        if pd.api.types.is_numeric_dtype(out[vA]):
+            out[vA] = out[vA].round(2)
+
+    matched = int((out["匹配状态"] == "已匹配").sum())
+    total = len(out)
+    summary_rows = [
+        ("全部", "参考表数量", len(refs)),
+        ("全部", "A表目标数据组数", len(a_pairs)),
+        ("全部", "A表总行数", total),
+        ("全部", "已匹配(任一参考表有数据)", matched),
+        ("全部", "未匹配(所有参考表无数据)", total - matched),
+    ]
+    for ref_label, aggR, kR, record_col in ref_match_rows:
+        ref_matched = int((merged[record_col].fillna(0) > 0).sum())
+        summary_rows.extend([
+            (ref_label, f"{ref_label}聚合方式", aggR),
+            (ref_label, f"关联字段(A→{ref_label})", f"{kA} ↔ {kR}"),
+            (ref_label, f"{ref_label}匹配行数", ref_matched),
+        ])
+    for (target_no, vA), orig_col in zip(a_pairs, orig_cols):
+        before = pd.to_numeric(out[orig_col], errors="coerce").fillna(0).sum()
+        after = pd.to_numeric(out[vA], errors="coerce").fillna(0).sum()
+        summary_rows.extend([
+            ("全部", f"目标数据{target_no} A列", vA),
+            ("全部", f"目标数据{target_no} A原合计", round(before, 2)),
+            ("全部", f"目标数据{target_no} 回填后合计", round(after, 2)),
+            ("全部", f"目标数据{target_no} 变化量", round(after - before, 2)),
+        ])
+    summary = pd.DataFrame(summary_rows, columns=["参考表", "指标", "值"])
+    return out, summary, None
+
+
 # ================ 预设（与桌面版对齐） ================
 PRESETS = {
     "t2": {
@@ -252,7 +589,7 @@ def file_sheet_picker(key: str, multi_sheet: bool = False, default_file: str | N
 
 # ================ 主页 ================
 st.title("📊 跨表核对 · Web 版")
-st.caption("功能与桌面版一致：① 自定义分组聚合 ② 跨表查询及核对 ③ 带运算核对指定列")
+st.caption("功能与桌面版一致：① 自定义分组聚合 ② 跨表查询及核对（多参考表/多目标数据）③ 带运算核对指定列")
 
 tab1, tab2, tab3 = st.tabs([
     "① 自定义分组聚合",
@@ -330,221 +667,273 @@ with tab1:
 # ---------------- Tab 2：跨表查询及核对 ----------------
 with tab2:
     st.subheader("② 跨表查询及核对")
-    c1, c2 = st.columns([3, 1])
-    with c1:
+    st.caption("A 表作为基表，B/C/D... 表作为参考表；目标数据编号以 A 表为准，参考表之间不能重复占用同一编号。")
+    with st.expander("使用教程（精简）", expanded=False):
+        st.markdown(
+            "- 先在左侧文件管家加载或上传 Excel。\n"
+            "- 核对：比对 A 表与一个或多个参考表的目标数据，输出汇总、差异明细、全量对比。\n"
+            "- 查询：从参考表查到目标数据后回填到 A 表副本，不修改原文件。\n"
+            "- 点顶部 `+` 添加参考表；参考表右上角 `-` 删除该表。\n"
+            "- A 表可增加目标数据1/2/3...；参考表最多添加 A 表已有编号，且同一编号只能被一个参考表占用。\n"
+            "- A 表单 Sheet；参考表支持多 Sheet 合并；各表都可设置过滤、关联字段、目标数据和聚合方式。"
+        )
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stHorizontalBlock"]:has(.ck-table-card-marker) {
+            overflow-x: auto;
+            flex-wrap: nowrap;
+            gap: 0.75rem;
+            padding-bottom: 0.35rem;
+        }
+        div[data-testid="stHorizontalBlock"]:has(.ck-table-card-marker) > div {
+            min-width: 430px;
+            flex: 0 0 430px;
+        }
+        .ck-table-card-marker { display: none; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    init_cross_table_state()
+    notice = st.session_state.pop("ck_notice", None)
+    if notice:
+        st.warning(notice)
+
+    top_mode, top_preset, top_add = st.columns([5, 1.5, 1.3])
+    with top_mode:
         mode = st.radio(
             "模式",
             [
-                "核对  (比对两表目标数据是否一致，输出差异报告)",
-                "查询  (从B表查到目标数据回填到A表，输出带结果的A表副本)",
+                "核对  (比对A表与参考表目标数据，输出差异报告)",
+                "查询  (从参考表查到目标数据回填到A表副本)",
             ],
             horizontal=True, key="ck_mode",
         )
-    with c2:
-        if st.button("应用默认预设 (t2)", key="ck_preset"):
-            # 加载默认文件到文件管家
+    with top_preset:
+        if st.button("应用默认预设 (t2)", key="ck_preset", use_container_width=True):
             for name in (PRESETS["t2"]["A"]["file"], PRESETS["t2"]["B"]["file"]):
                 p = DATA_DIR / name
                 if p.exists() and name not in st.session_state.files:
                     add_file(name, p.read_bytes())
-            # 设置初始选择值（通过删除已存在的 widget key 再设置）
             for k in list(st.session_state.keys()):
-                if k.startswith(("ckA_", "ckB_")):
+                if (
+                    k.startswith("ckA_")
+                    or k.startswith("ckR")
+                    or k.startswith("ck_ref")
+                    or k in {"ck_a_target_count", "ck_next_ref_id", "ck_tol", "ck_norm", "ck_outname"}
+                    or k in {"_preset_A", "_preset_B", "_preset_refs", "_preset_tol"}
+                ):
                     del st.session_state[k]
-            pa = PRESETS["t2"]["A"]; pb = PRESETS["t2"]["B"]
+            pa = PRESETS["t2"]["A"]
+            pb = PRESETS["t2"]["B"]
             st.session_state["_preset_A"] = pa
-            st.session_state["_preset_B"] = pb
+            st.session_state["_preset_refs"] = [pb]
             st.session_state["_preset_tol"] = PRESETS["t2"]["tol"]
+            st.session_state["ck_a_target_count"] = 1
+            st.session_state["ck_ref_ids"] = [1]
+            st.session_state["ck_next_ref_id"] = 2
+            st.session_state["ck_ref_targets_1"] = [1]
             st.rerun()
+    with top_add:
+        if st.button("+", key="ck_add_ref", help="添加参考表", use_container_width=True):
+            add_reference_table()
+            st.rerun()
+        st.caption("添加参考表")
 
     is_check = mode.startswith("核对")
-
     pa = st.session_state.get("_preset_A", {})
-    pb = st.session_state.get("_preset_B", {})
+    ref_presets = st.session_state.get("_preset_refs", [])
+    ref_ids = list(st.session_state.get("ck_ref_ids", [1]))
+    table_cols = st.columns(1 + len(ref_ids))
 
-    colA, colB = st.columns(2)
-    with colA:
-        st.markdown("#### 【A 表 · 基准/待核对】")
-        fnA, shA, hdrA, dfA = file_sheet_picker(
-            "ckA",
-            multi_sheet=False,
-            default_file=pa.get("file"),
-            default_sheet=pa.get("sheet"),
-            default_header=pa.get("header", 0),
-        )
-        filtA = st.text_input("过滤表达式(可选)", value=pa.get("filter", ""),
-                             placeholder="如  金额>1000   或   部门=='教职工'", key="ckA_filter")
-        if dfA is not None:
-            try:
-                dfA_filt = apply_filter(dfA, filtA)
-            except Exception as e:
-                st.error(f"A 过滤表达式错误：{e}")
-                dfA_filt = None
-            if dfA_filt is not None:
-                cols = list(dfA_filt.columns)
-                ki = cols.index(pa["key"]) if pa.get("key") in cols else 0
-                vi = cols.index(pa["val"]) if pa.get("val") in cols else 0
-                kA = st.selectbox("关联相同字段", cols, index=ki, key="ckA_key")
-                vA = st.selectbox("目标数据", cols, index=vi, key="ckA_val")
-                ai = 0
-                if pa.get("agg"):
-                    for i, o in enumerate(CHECK_AGG_OPTS):
-                        if o.startswith(pa["agg"]):
-                            ai = i; break
-                aggA_text = st.selectbox("同键聚合", CHECK_AGG_OPTS, index=ai, key="ckA_agg")
-                st.caption(f"✓ A 加载 {len(dfA_filt)} 行")
-        else:
-            dfA_filt = None
-            kA = vA = aggA_text = None
+    a_config = None
+    with table_cols[0]:
+        st.markdown('<span class="ck-table-card-marker"></span>', unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown("#### 【A 表 · 基准/待核对】")
+            fnA, shA, hdrA, dfA = file_sheet_picker(
+                "ckA",
+                multi_sheet=False,
+                default_file=pa.get("file"),
+                default_sheet=pa.get("sheet"),
+                default_header=pa.get("header", 0),
+            )
+            filtA = st.text_input(
+                "过滤表达式(可选)",
+                value=pa.get("filter", ""),
+                placeholder="如  金额>1000   或   部门=='教职工'",
+                key="ckA_filter",
+            )
+            if dfA is not None:
+                try:
+                    dfA_filt = apply_filter(dfA, filtA)
+                except Exception as e:
+                    st.error(f"A 过滤表达式错误：{e}")
+                    dfA_filt = None
+                if dfA_filt is not None:
+                    cols = list(dfA_filt.columns)
+                    key_idx = cols.index(pa["key"]) if pa.get("key") in cols else 0
+                    kA = st.selectbox("关联相同字段", cols, index=key_idx, key="ckA_key")
+                    target_head, add_col, remove_col = st.columns([4, 0.8, 0.8])
+                    target_head.markdown("**目标数据**")
+                    if add_col.button("+", key="ckA_add_target", help="增加一组目标数据", use_container_width=True):
+                        add_a_target()
+                        st.rerun()
+                    if remove_col.button("-", key="ckA_remove_target", help="删除最后一组目标数据",
+                                         disabled=st.session_state.ck_a_target_count <= 1, use_container_width=True):
+                        remove_a_target()
+                        st.rerun()
 
-    with colB:
-        st.markdown("#### 【B 表 · 参照/权威，可多 Sheet】")
-        fnB, shB, hdrB, dfB = file_sheet_picker(
-            "ckB",
-            multi_sheet=True,
-            default_file=pb.get("file"),
-            default_sheets=pb.get("sheets", []),
-            default_header=pb.get("header", 0),
-        )
-        filtB = st.text_input("过滤表达式(可选)", value=pb.get("filter", ""),
-                             placeholder="如  退费金额>1000", key="ckB_filter")
-        if dfB is not None:
-            try:
-                dfB_filt = apply_filter(dfB, filtB)
-            except Exception as e:
-                st.error(f"B 过滤表达式错误：{e}")
-                dfB_filt = None
-            if dfB_filt is not None:
-                cols = list(dfB_filt.columns)
-                ki = cols.index(pb["key"]) if pb.get("key") in cols else 0
-                vi = cols.index(pb["val"]) if pb.get("val") in cols else 0
-                kB = st.selectbox("关联相同字段", cols, index=ki, key="ckB_key")
-                vB = st.selectbox("目标数据", cols, index=vi, key="ckB_val")
-                ai = 0
-                if pb.get("agg"):
-                    for i, o in enumerate(CHECK_AGG_OPTS):
-                        if o.startswith(pb["agg"]):
-                            ai = i; break
-                aggB_text = st.selectbox("同键聚合", CHECK_AGG_OPTS, index=ai, key="ckB_agg")
-                st.caption(f"✓ B 加载 {len(dfB_filt)} 行")
-        else:
-            dfB_filt = None
-            kB = vB = aggB_text = None
+                    defaults = pa.get("vals") or ([pa["val"]] if pa.get("val") else [])
+                    a_pairs = []
+                    for target_no in range(1, int(st.session_state.ck_a_target_count) + 1):
+                        default_val = defaults[target_no - 1] if target_no - 1 < len(defaults) else None
+                        val_idx = cols.index(default_val) if default_val in cols else 0
+                        vA = st.selectbox(f"目标数据{target_no}", cols, index=val_idx, key=f"ckA_val_{target_no}")
+                        a_pairs.append((target_no, vA))
 
-    c1, c2, c3 = st.columns(3)
+                    agg_idx = 0
+                    if pa.get("agg"):
+                        for i, opt in enumerate(CHECK_AGG_OPTS):
+                            if opt.startswith(pa["agg"]):
+                                agg_idx = i
+                                break
+                    aggA_text = st.selectbox("同键聚合", CHECK_AGG_OPTS, index=agg_idx, key="ckA_agg")
+                    st.caption(f"已加载 {len(dfA_filt)} 行")
+                    a_config = (dfA_filt, kA, a_pairs, agg_key(aggA_text))
+
+    refs = []
+    all_refs_ready = True
+    for ref_pos, ref_id in enumerate(ref_ids):
+        ref_label = table_letter(ref_pos + 1)
+        preset = ref_presets[ref_pos] if ref_pos < len(ref_presets) else {}
+        with table_cols[ref_pos + 1]:
+            st.markdown('<span class="ck-table-card-marker"></span>', unsafe_allow_html=True)
+            with st.container(border=True):
+                title_col, del_col = st.columns([4.5, 1])
+                title_col.markdown(f"#### 【{ref_label} 表 · 参照/权威，可多 Sheet】")
+                if del_col.button("-", key=f"ckR{ref_id}_delete", help="删除该表",
+                                  disabled=len(ref_ids) <= 1, use_container_width=True):
+                    remove_reference_table(ref_id)
+                    st.rerun()
+                del_col.caption("删除该表")
+
+                fnR, shR, hdrR, dfR = file_sheet_picker(
+                    f"ckR{ref_id}",
+                    multi_sheet=True,
+                    default_file=preset.get("file"),
+                    default_sheets=preset.get("sheets", []),
+                    default_header=preset.get("header", 0),
+                )
+                filtR = st.text_input(
+                    "过滤表达式(可选)",
+                    value=preset.get("filter", ""),
+                    placeholder="如  退费金额>1000",
+                    key=f"ckR{ref_id}_filter",
+                )
+                if dfR is None:
+                    all_refs_ready = False
+                    continue
+                try:
+                    dfR_filt = apply_filter(dfR, filtR)
+                except Exception as e:
+                    st.error(f"{ref_label} 过滤表达式错误：{e}")
+                    all_refs_ready = False
+                    continue
+                cols = list(dfR_filt.columns)
+                key_idx = cols.index(preset["key"]) if preset.get("key") in cols else 0
+                kR = st.selectbox("关联相同字段", cols, index=key_idx, key=f"ckR{ref_id}_key")
+
+                target_head, add_col = st.columns([4.5, 1])
+                target_head.markdown("**目标数据**")
+                if add_col.button("+", key=f"ckR{ref_id}_add_target", help="增加一组目标数据", use_container_width=True):
+                    add_ref_target(ref_id)
+                    st.rerun()
+                targets = list(st.session_state.get(f"ck_ref_targets_{ref_id}", []))
+                defaults = preset.get("vals") or ([preset["val"]] if preset.get("val") else [])
+                r_pairs = []
+                if not targets:
+                    st.info("暂无目标数据；可先在 A 表增加目标数据，或点击本表 + 分配可用编号。")
+                for target_index, target_no in enumerate(targets):
+                    row_val, row_remove = st.columns([4.5, 1])
+                    default_val = defaults[target_no - 1] if target_no - 1 < len(defaults) else None
+                    val_idx = cols.index(default_val) if default_val in cols else 0
+                    vR = row_val.selectbox(f"目标数据{target_no}", cols, index=val_idx,
+                                           key=f"ckR{ref_id}_val_{target_no}")
+                    if row_remove.button("-", key=f"ckR{ref_id}_remove_target_{target_index}",
+                                         help="删除这一组目标数据", use_container_width=True):
+                        remove_ref_target(ref_id, target_index)
+                        st.rerun()
+                    r_pairs.append((int(target_no), vR))
+
+                agg_idx = 0
+                if preset.get("agg"):
+                    for i, opt in enumerate(CHECK_AGG_OPTS):
+                        if opt.startswith(preset["agg"]):
+                            agg_idx = i
+                            break
+                aggR_text = st.selectbox("同键聚合", CHECK_AGG_OPTS, index=agg_idx, key=f"ckR{ref_id}_agg")
+                st.caption(f"已加载 {len(dfR_filt)} 行")
+                if not r_pairs:
+                    all_refs_ready = False
+                refs.append((ref_label, dfR_filt, kR, r_pairs, agg_key(aggR_text)))
+
+    param_tol, param_norm, param_out = st.columns([1.2, 2.2, 2.6])
     default_tol = st.session_state.get("_preset_tol", 0.01)
-    tol = c1.number_input("差额容差", 0.0, 10000.0, float(default_tol), step=0.01, key="ck_tol")
-    norm = c2.checkbox("键列按字符串规范化（推荐）", value=True, key="ck_norm")
-    out_name = c3.text_input("输出文件名", value="jieguo1.xlsx", key="ck_outname")
+    tol = param_tol.number_input("差额容差", 0.0, 10000.0, float(default_tol), step=0.01, key="ck_tol")
+    norm = param_norm.checkbox("键列按字符串规范化（推荐）", value=True, key="ck_norm")
+    out_name = param_out.text_input("输出文件名", value="jieguo1.xlsx", key="ck_outname")
 
-    can_run = (dfA_filt is not None) and (dfB_filt is not None) and all([kA, vA, kB, vB])
+    can_run = a_config is not None and refs and all_refs_ready and len(refs) == len(ref_ids)
     run_label = "▶ 执行核对" if is_check else "▶ 执行查询"
     if st.button(run_label, type="primary", disabled=not can_run, key="ck_run"):
-        aggA = agg_key(aggA_text); aggB = agg_key(aggB_text)
-
+        dfA_filt, kA, a_pairs, aggA = a_config
         if is_check:
-            # ---------- 核对 ----------
-            A = dfA_filt[dfA_filt[kA].notna()].copy()
-            B = dfB_filt[dfB_filt[kB].notna()].copy()
-            A["__k"] = A[kA].map(norm_id) if norm else A[kA]
-            B["__k"] = B[kB].map(norm_id) if norm else B[kB]
-            A["__v"] = A[vA].map(to_num); B["__v"] = B[vB].map(to_num)
-            Ag = A.groupby("__k", as_index=False).agg(A值=("__v", aggA))
-            Bg = B.groupby("__k", as_index=False).agg(B值=("__v", aggB))
-            m = Ag.merge(Bg, on="__k", how="outer", indicator=True)
-            m["A值"] = m["A值"].fillna(0).round(2); m["B值"] = m["B值"].fillna(0).round(2)
-            m["差额(A-B)"] = (m["A值"] - m["B值"]).round(2)
-
-            def cls(r):
-                if r["_merge"] == "left_only":
-                    return "仅A有"
-                if r["_merge"] == "right_only":
-                    return "仅B有(A遗漏)"
-                return "一致" if abs(r["差额(A-B)"]) <= tol else "金额不一致"
-            m["核对状态"] = m.apply(cls, axis=1)
-            m = m.drop(columns=["_merge"]).rename(columns={"__k": "键值"})
-
-            cnt = m["核对状态"].value_counts().to_dict()
-            summary = pd.DataFrame({
-                "指标": ["合集", "一致", "金额不一致", "仅A有", "仅B有(A遗漏)",
-                         "A合计", "B合计", "差额合计", f"A表({aggA})行数", f"B表({aggB})行数"],
-                "值": [len(m), cnt.get("一致", 0), cnt.get("金额不一致", 0),
-                       cnt.get("仅A有", 0), cnt.get("仅B有(A遗漏)", 0),
-                       round(m["A值"].sum(), 2), round(m["B值"].sum(), 2),
-                       round(m["差额(A-B)"].sum(), 2), len(A), len(B)],
-            })
-            diff = m[m["核对状态"] != "一致"].reset_index(drop=True)
-
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("一致", cnt.get("一致", 0))
-            k2.metric("不一致", cnt.get("金额不一致", 0))
-            k3.metric("仅A有", cnt.get("仅A有", 0))
-            k4.metric("仅B有", cnt.get("仅B有(A遗漏)", 0))
-            st.dataframe(summary, use_container_width=True, hide_index=True)
-            with st.expander(f"差异明细（{len(diff)} 条）", expanded=True):
-                st.dataframe(diff, use_container_width=True, height=320)
-            with st.expander("全量对比", expanded=False):
-                st.dataframe(m, use_container_width=True, height=320)
-            st.download_button("⬇ 下载核对结果",
-                              data=to_xlsx_bytes({"汇总": summary, "差异明细": diff, "全量对比": m}),
-                              file_name=out_name, key="ck_dl")
+            summary, diff, full, error = build_cross_check_results(dfA_filt, kA, a_pairs, aggA, refs, tol, norm)
+            if error:
+                st.warning(error)
+            else:
+                cnt = full["核对状态"].value_counts().to_dict()
+                k1, k2, k3, k4, k5 = st.columns(5)
+                k1.metric("参考表", len(refs))
+                k2.metric("一致", cnt.get("一致", 0))
+                k3.metric("不一致", cnt.get("金额不一致", 0))
+                k4.metric("仅A有", cnt.get("仅A有", 0))
+                k5.metric("差异总数", len(diff))
+                st.dataframe(summary, use_container_width=True, hide_index=True)
+                with st.expander(f"差异明细（{len(diff)} 条）", expanded=True):
+                    st.dataframe(diff, use_container_width=True, height=320)
+                with st.expander("全量对比", expanded=False):
+                    st.dataframe(full, use_container_width=True, height=320)
+                st.download_button(
+                    "⬇ 下载核对结果",
+                    data=to_xlsx_bytes({"汇总": summary, "差异明细": diff, "全量对比": full}),
+                    file_name=out_name,
+                    key="ck_dl",
+                )
         else:
-            # ---------- 查询：B 回填到 A 副本 ----------
-            A = dfA_filt.copy()
-            B = dfB_filt[dfB_filt[kB].notna()].copy()
-            A["__k"] = A[kA].map(norm_id) if norm else A[kA]
-            B["__k"] = B[kB].map(norm_id) if norm else B[kB]
-            B["__v"] = B[vB].map(to_num)
-            Bg = B.groupby("__k", as_index=False).agg(
-                __查询值=("__v", aggB),
-                __B来源记录数=("__k", "count"),
-                __B来源数据值=(vB, list_vals),
-            )
-            merged = A.merge(Bg, on="__k", how="left")
-            merged["匹配状态"] = merged["__查询值"].apply(lambda x: "未匹配" if pd.isna(x) else "已匹配")
-            orig_col = f"{vA}_原值"
-            merged[orig_col] = merged[vA]
-            merged[vA] = merged["__查询值"].where(merged["__查询值"].notna(), merged[orig_col])
-            out_cols = (
-                [c for c in A.columns if c != "__k"]
-                + [orig_col, "__B来源数据值", "__B来源记录数", "匹配状态"]
-            )
-            out = merged[out_cols].rename(columns={
-                "__B来源数据值": "B_来源数据值",
-                "__B来源记录数": "B_来源记录数",
-            })
-            if pd.api.types.is_numeric_dtype(out[vA]):
-                out[vA] = out[vA].round(2)
-
-            matched = int((out["匹配状态"] == "已匹配").sum())
-            total = len(out)
-            summary = pd.DataFrame({
-                "指标": [
-                    "A表总行数", "已匹配(B有数据)", "未匹配(B无数据)",
-                    f"A原『{vA}』合计", f"回填后『{vA}』合计", "变化量",
-                    "B聚合方式", "关联字段(A→B)",
-                ],
-                "值": [
-                    total, matched, total - matched,
-                    round(pd.to_numeric(out[orig_col], errors="coerce").fillna(0).sum(), 2),
-                    round(pd.to_numeric(out[vA], errors="coerce").fillna(0).sum(), 2),
-                    round(
-                        pd.to_numeric(out[vA], errors="coerce").fillna(0).sum()
-                        - pd.to_numeric(out[orig_col], errors="coerce").fillna(0).sum(), 2
-                    ),
-                    aggB, f"{kA} ↔ {kB}",
-                ],
-            })
-            k1, k2, k3 = st.columns(3)
-            k1.metric("A 表总行数", total)
-            k2.metric("已匹配", matched)
-            k3.metric("未匹配", total - matched)
-            st.dataframe(summary, use_container_width=True, hide_index=True)
-            st.markdown(f"**查询结果 (A 表副本，已回填『{vA}』列)**")
-            st.dataframe(out, use_container_width=True, height=420)
-            st.download_button("⬇ 下载查询结果",
-                              data=to_xlsx_bytes({"查询结果(A表副本)": out, "汇总": summary}),
-                              file_name=out_name, key="ck_dl_lookup")
+            out, summary, error = build_cross_lookup_results(dfA_filt, kA, a_pairs, refs, norm)
+            if error:
+                st.warning(error)
+            else:
+                matched = int((out["匹配状态"] == "已匹配").sum())
+                total = len(out)
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("参考表", len(refs))
+                k2.metric("A 表总行数", total)
+                k3.metric("已匹配", matched)
+                k4.metric("未匹配", total - matched)
+                st.dataframe(summary, use_container_width=True, hide_index=True)
+                st.markdown("**查询结果 (A 表副本，已按目标数据回填)**")
+                st.dataframe(out, use_container_width=True, height=420)
+                st.download_button(
+                    "⬇ 下载查询结果",
+                    data=to_xlsx_bytes({"查询结果(A表副本)": out, "汇总": summary}),
+                    file_name=out_name,
+                    key="ck_dl_lookup",
+                )
 
 
 # ---------------- Tab 3：带运算核对指定列 ----------------

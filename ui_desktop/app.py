@@ -449,8 +449,20 @@ def _parse_agg(text: str) -> str:
     return text.split(" ")[0]
 
 
+def _table_letter(index: int) -> str:
+    """0 -> A, 1 -> B ... 26 -> AA"""
+    s = ""
+    index += 1
+    while index:
+        index, r = divmod(index - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
 class _SideEditor(QWidget):
     """对话框内的一侧（A 或 B）编辑器：文件+sheet(多选)+表头+过滤+键列+值列+聚合方式"""
+    add_target_requested = Signal()
+    remove_target_requested = Signal(int)
 
     def __init__(self, title: str, default_dir: Path, allow_multi_sheet: bool = False):
         super().__init__()
@@ -458,12 +470,13 @@ class _SideEditor(QWidget):
         self.allow_multi_sheet = allow_multi_sheet
         self._file_path: Path | None = None
         self._cols: list[str] = []
+        self._target_rows: list[list] = []
 
         g = QGridLayout(self)
         g.setContentsMargins(6, 6, 6, 6)
-        t = QLabel(f"【{title}】")
-        t.setStyleSheet("font-weight:bold;")
-        g.addWidget(t, 0, 0, 1, 4)
+        self.title_label = QLabel(f"【{title}】")
+        self.title_label.setStyleSheet("font-weight:bold;")
+        g.addWidget(self.title_label, 0, 0, 1, 4)
 
         self.ed_file = QLineEdit(); self.ed_file.setReadOnly(True)
         self.ed_file.setPlaceholderText("点击『浏览』选择文件")
@@ -497,7 +510,25 @@ class _SideEditor(QWidget):
         self.cb_agg = QComboBox(); self.cb_agg.addItems(CHECK_AGG_OPTS)
         self.cb_agg.setToolTip("当同一键在该表出现多次时如何合并")
         g.addWidget(QLabel("关联相同字段:"), 4, 0); g.addWidget(self.cb_key, 4, 1)
-        g.addWidget(QLabel("目标数据:"), 4, 2); g.addWidget(self.cb_val, 4, 3)
+        self.target_panel = QWidget()
+        self.target_layout = QVBoxLayout(self.target_panel)
+        self.target_layout.setContentsMargins(0, 0, 0, 0)
+        self.target_layout.setSpacing(4)
+        self.empty_target_panel = QWidget()
+        empty_h = QHBoxLayout(self.empty_target_panel)
+        empty_h.setContentsMargins(0, 0, 0, 0)
+        empty_h.setSpacing(4)
+        btn_add_empty = QPushButton("+")
+        btn_add_empty.setFixedWidth(28)
+        btn_add_empty.setToolTip("增加一组目标数据")
+        btn_add_empty.clicked.connect(lambda checked=False: self.add_target_requested.emit())
+        empty_h.addWidget(QLabel("目标数据:"))
+        empty_h.addStretch(1)
+        empty_h.addWidget(btn_add_empty)
+        empty_h.addWidget(QLabel("添加目标数据"))
+        self.target_layout.addWidget(self.empty_target_panel)
+        g.addWidget(self.target_panel, 4, 2, 1, 2)
+        self.add_target_row()
         g.addWidget(QLabel("同键聚合:"), 5, 0); g.addWidget(self.cb_agg, 5, 1, 1, 3)
 
         self.status = QLabel("（未加载）")
@@ -553,11 +584,73 @@ class _SideEditor(QWidget):
             df = self._read()
             self._cols = list(df.columns)
             self.cb_key.clear(); self.cb_key.addItems(self._cols)
-            self.cb_val.clear(); self.cb_val.addItems(self._cols)
+            for _, _, combo, _, _, _ in self._target_rows:
+                combo.clear()
+                combo.addItems(self._cols)
             self.status.setText(f"✓ 已加载 {len(df)} 行 × {df.shape[1]} 列")
         except Exception as e:
             self.status.setText(f"✗ {e}")
             QMessageBox.critical(self, "错误", f"加载失败：{e}")
+
+    def set_title(self, title: str):
+        self.title_label.setText(f"【{title}】")
+
+    def _refresh_target_labels(self):
+        last = len(self._target_rows) - 1
+        for i, row_info in enumerate(self._target_rows):
+            _, label, _, btn_add, btn_remove, target_no = row_info
+            if not self.allow_multi_sheet:
+                target_no = i + 1
+                row_info[5] = target_no
+            label.setText(f"目标数据{target_no}:")
+            btn_add.setVisible(i == last)
+            btn_remove.setVisible(self.allow_multi_sheet or len(self._target_rows) > 1)
+        self.empty_target_panel.setVisible(self.allow_multi_sheet and not self._target_rows)
+
+    def add_target_row(self, selected: str | None = None, target_no: int | None = None):
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
+        label = QLabel()
+        combo = QComboBox()
+        combo.addItems(self._cols)
+        if selected:
+            idx = combo.findText(selected)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        btn_add = QPushButton("+")
+        btn_add.setFixedWidth(28)
+        btn_add.setToolTip("增加一组目标数据")
+        btn_add.clicked.connect(lambda checked=False: self.add_target_requested.emit())
+        btn_remove = QPushButton("-")
+        btn_remove.setFixedWidth(28)
+        btn_remove.setToolTip("删除这一组目标数据")
+        btn_remove.clicked.connect(lambda checked=False: self.remove_target_requested.emit(self._target_rows.index(row_info)))
+        h.addWidget(label)
+        h.addWidget(combo, 1)
+        h.addWidget(btn_add)
+        h.addWidget(btn_remove)
+        row_info = [row, label, combo, btn_add, btn_remove, target_no or (len(self._target_rows) + 1)]
+        self._target_rows.append(row_info)
+        insert_at = max(0, self.target_layout.count() - 1)
+        self.target_layout.insertWidget(insert_at, row)
+        self._refresh_target_labels()
+
+    def remove_target_row(self, index: int):
+        if (len(self._target_rows) <= 1 and not self.allow_multi_sheet) or index < 0 or index >= len(self._target_rows):
+            return
+        row, _, _, _, _, _ = self._target_rows.pop(index)
+        self.target_layout.removeWidget(row)
+        row.deleteLater()
+        self._refresh_target_labels()
+
+    def set_target_count(self, count: int):
+        count = max(0 if self.allow_multi_sheet else 1, count)
+        while len(self._target_rows) < count:
+            self.add_target_row()
+        while len(self._target_rows) > count:
+            self.remove_target_row(len(self._target_rows) - 1)
 
     def _read(self) -> pd.DataFrame:
         engine = "xlrd" if self._file_path.suffix.lower() == ".xls" else "openpyxl"
@@ -584,10 +677,16 @@ class _SideEditor(QWidget):
                 raise RuntimeError(f"过滤表达式错误：{e}")
         return df
 
-    # 供外部：取 (df, key列, 值列, 聚合方式)
-    def get_data(self) -> tuple[pd.DataFrame, str, str, str]:
+    # 供外部：取 (df, key列, 值列列表, 聚合方式)
+    def get_data(self) -> tuple[pd.DataFrame, str, list[str], str]:
         df = self._read()
-        return df, self.cb_key.currentText(), self.cb_val.currentText(), _parse_agg(self.cb_agg.currentText())
+        vals = [combo.currentText() for _, _, combo, _, _, _ in self._target_rows]
+        return df, self.cb_key.currentText(), vals, _parse_agg(self.cb_agg.currentText())
+
+    def get_target_data(self) -> tuple[pd.DataFrame, str, list[tuple[int, str]], str]:
+        df = self._read()
+        pairs = [(int(target_no), combo.currentText()) for _, _, combo, _, _, target_no in self._target_rows]
+        return df, self.cb_key.currentText(), pairs, _parse_agg(self.cb_agg.currentText())
 
     # 预设
     def apply_preset(self, cfg: dict, data_dir: Path):
@@ -623,10 +722,13 @@ class _SideEditor(QWidget):
             idx = self.cb_key.findText(cfg["key"])
             if idx >= 0:
                 self.cb_key.setCurrentIndex(idx)
-        if "val" in cfg:
-            idx = self.cb_val.findText(cfg["val"])
-            if idx >= 0:
-                self.cb_val.setCurrentIndex(idx)
+        vals = cfg.get("vals") or ([cfg["val"]] if "val" in cfg else [])
+        if vals:
+            self.set_target_count(len(vals))
+            for val, (_, _, combo, _, _, _) in zip(vals, self._target_rows):
+                idx = combo.findText(val)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
         if "agg" in cfg:
             for i, o in enumerate(CHECK_AGG_OPTS):
                 if o.startswith(cfg["agg"]):
@@ -635,7 +737,7 @@ class _SideEditor(QWidget):
 
 
 class CrossTableCheckDialog(QDialog):
-    """跨表核对：A 表 vs B 表（B 支持多 sheet 合并），按键列比对值列"""
+    """跨表核对：A 表 vs 多个参考表，按键列比对或查询多组值列"""
 
     def __init__(self, parent=None, title: str = "跨表核对",
                  default_dir: Path = None, default_out: Path = None,
@@ -653,24 +755,40 @@ class CrossTableCheckDialog(QDialog):
         from PySide6.QtWidgets import QRadioButton, QButtonGroup
         mode_box = QGroupBox("模式")
         mh = QHBoxLayout(mode_box)
-        self.rb_check = QRadioButton("核对  (比对两表目标数据是否一致，输出差异报告)")
-        self.rb_lookup = QRadioButton("查询  (从B表查到目标数据回填到A表，输出带结果的A表副本)")
+        self.rb_check = QRadioButton("核对  (比对A表与参考表目标数据，输出差异报告)")
+        self.rb_lookup = QRadioButton("查询  (从参考表查到目标数据回填到A表副本)")
         self.rb_check.setChecked(True)
         self._mode_group = QButtonGroup(self)
         self._mode_group.addButton(self.rb_check, 0)
         self._mode_group.addButton(self.rb_lookup, 1)
         self._mode_group.idClicked.connect(self._on_mode_change)
         mh.addWidget(self.rb_check); mh.addWidget(self.rb_lookup); mh.addStretch(1)
+        self.btn_add_ref = QPushButton("+")
+        self.btn_add_ref.setFixedWidth(30)
+        self.btn_add_ref.setToolTip("添加参考表")
+        self.btn_add_ref.clicked.connect(self._add_reference_table)
+        mh.addWidget(self.btn_add_ref)
+        mh.addWidget(QLabel("添加参考表"))
         root.addWidget(mode_box)
 
-        # A / B 并排
-        side_box = QHBoxLayout()
+        # A / B / C ... 横向滚动排列
+        self.side_scroll = QScrollArea()
+        self.side_scroll.setWidgetResizable(True)
+        self.side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.side_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.side_area = QWidget()
+        self.side_box = QHBoxLayout(self.side_area)
+        self.side_box.setContentsMargins(0, 0, 0, 0)
+        self.side_box.setSpacing(8)
+        self.side_scroll.setWidget(self.side_area)
         self.sideA = _SideEditor("A 表 (基准/待核对)", self.default_dir, allow_multi_sheet=False)
-        self.sideB = _SideEditor("B 表 (参照/权威，可多 sheet)", self.default_dir, allow_multi_sheet=True)
-        wrapA = QGroupBox(); wrapA.setLayout(QVBoxLayout()); wrapA.layout().addWidget(self.sideA)
-        wrapB = QGroupBox(); wrapB.setLayout(QVBoxLayout()); wrapB.layout().addWidget(self.sideB)
-        side_box.addWidget(wrapA, 1); side_box.addWidget(wrapB, 1)
-        root.addLayout(side_box)
+        self.ref_sides: list[_SideEditor] = []
+        self.side_wrappers: dict[_SideEditor, QGroupBox] = {}
+        self._connect_side(self.sideA)
+        self.side_box.addWidget(self._wrap_side(self.sideA, is_reference=False))
+        self._add_reference_table()
+        self.sideB = self.ref_sides[0]
+        root.addWidget(self.side_scroll)
 
         # 公共参数
         common = QGroupBox("核对参数")
@@ -681,11 +799,12 @@ class CrossTableCheckDialog(QDialog):
         from PySide6.QtWidgets import QCheckBox
         self.cb_norm = QCheckBox("键列按字符串规范化（推荐，支持工号前导0等）"); self.cb_norm.setChecked(True)
         cl.addWidget(QLabel("容差:"), 0, 0); cl.addWidget(self.sp_tol, 0, 1)
-        cl.addWidget(self.cb_norm, 0, 2, 1, 2)
-        cl.addWidget(QLabel("输出:"), 1, 0)
+        cl.addWidget(self.cb_norm, 0, 2)
+        cl.addWidget(QLabel("输出:"), 0, 3)
         self.ed_out = QLineEdit(str(self.default_out))
         btn_out = QPushButton("…"); btn_out.setFixedWidth(30); btn_out.clicked.connect(self._pick_out)
-        cl.addWidget(self.ed_out, 1, 1, 1, 2); cl.addWidget(btn_out, 1, 3)
+        cl.addWidget(self.ed_out, 0, 4); cl.addWidget(btn_out, 0, 5)
+        cl.setColumnStretch(4, 1)
         root.addWidget(common)
 
         # 结果
@@ -725,8 +844,11 @@ class CrossTableCheckDialog(QDialog):
         if preset:
             if preset.get("A"):
                 self.sideA.apply_preset(preset["A"], self.default_dir)
-            if preset.get("B"):
-                self.sideB.apply_preset(preset["B"], self.default_dir)
+            ref_presets = preset.get("refs") or ([preset["B"]] if preset.get("B") else [])
+            while len(self.ref_sides) < len(ref_presets):
+                self._add_reference_table()
+            for side, cfg in zip(self.ref_sides, ref_presets):
+                side.apply_preset(cfg, self.default_dir)
             if "tol" in preset:
                 self.sp_tol.setValue(int(preset["tol"] * 100))  # 元→分
 
@@ -756,80 +878,265 @@ class CrossTableCheckDialog(QDialog):
             return self._run_lookup()
         return self._run_check()
 
+    def _connect_side(self, side: _SideEditor):
+        side.add_target_requested.connect(lambda side=side: self._add_target_for_side(side))
+        side.remove_target_requested.connect(lambda index, side=side: self._remove_target_for_side(side, index))
+
+    def _wrap_side(self, side: _SideEditor, *, is_reference: bool) -> QGroupBox:
+        wrap = QGroupBox()
+        wrap.setMinimumWidth(560)
+        wrap.setLayout(QVBoxLayout())
+        wrap.layout().setContentsMargins(4, 4, 4, 4)
+        if is_reference:
+            header = QHBoxLayout()
+            header.addStretch(1)
+            btn_delete = QPushButton("-")
+            btn_delete.setFixedWidth(28)
+            btn_delete.setToolTip("删除该表")
+            btn_delete.clicked.connect(lambda checked=False, side=side: self._remove_reference_table(side))
+            header.addWidget(btn_delete)
+            header.addWidget(QLabel("删除该表"))
+            wrap.layout().addLayout(header)
+        wrap.layout().addWidget(side)
+        self.side_wrappers[side] = wrap
+        return wrap
+
+    def _add_reference_table(self):
+        target_no = self._first_available_ref_target_no()
+        if target_no is None:
+            QMessageBox.warning(self, "提示", "没有可分配的目标数据，请先在A表增加目标数据，或删除其他参考表中的目标数据")
+            return
+        label = _table_letter(len(self.ref_sides) + 1)
+        side = _SideEditor(f"{label} 表 (参照/权威，可多 sheet)", self.default_dir, allow_multi_sheet=True)
+        side.set_target_count(1)
+        side._target_rows[0][5] = target_no
+        side._refresh_target_labels()
+        self._connect_side(side)
+        self.ref_sides.append(side)
+        self.side_box.addWidget(self._wrap_side(side, is_reference=True))
+        if len(self.ref_sides) == 1:
+            self.sideB = side
+
+    def _renumber_reference_tables(self):
+        for i, side in enumerate(self.ref_sides, start=1):
+            side.set_title(f"{_table_letter(i)} 表 (参照/权威，可多 sheet)")
+        if self.ref_sides:
+            self.sideB = self.ref_sides[0]
+
+    def _remove_reference_table(self, side: _SideEditor):
+        if len(self.ref_sides) <= 1:
+            QMessageBox.warning(self, "提示", "至少保留一个参考表")
+            return
+        if side not in self.ref_sides:
+            return
+        self.ref_sides.remove(side)
+        wrap = self.side_wrappers.pop(side, None)
+        if wrap is not None:
+            self.side_box.removeWidget(wrap)
+            wrap.deleteLater()
+        self._renumber_reference_tables()
+
+    def _used_ref_target_numbers(self, *, exclude: _SideEditor | None = None) -> set[int]:
+        used = set()
+        for side in self.ref_sides:
+            if side is exclude:
+                continue
+            used.update(int(row_info[5]) for row_info in side._target_rows)
+        return used
+
+    def _first_available_ref_target_no(self, *, exclude: _SideEditor | None = None) -> int | None:
+        base_count = len(self.sideA._target_rows)
+        used = self._used_ref_target_numbers(exclude=exclude)
+        current = set()
+        if exclude is not None:
+            current = {int(row_info[5]) for row_info in exclude._target_rows}
+        for target_no in range(1, base_count + 1):
+            if target_no not in used and target_no not in current:
+                return target_no
+        return None
+
+    def _add_target_for_side(self, side: _SideEditor):
+        if side is self.sideA:
+            side.add_target_row()
+            return
+        target_no = self._first_available_ref_target_no(exclude=side)
+        if target_no is None:
+            QMessageBox.warning(self, "提示", "该参考表不能再添加目标数据：A表目标数据数量已达上限，或编号已被其他参考表占用")
+            return
+        side.add_target_row(target_no=target_no)
+
+    def _remove_target_for_side(self, side: _SideEditor, index: int):
+        side.remove_target_row(index)
+
+    def _validate_targets(self, kA: str, a_pairs: list[tuple[int, str]], ref_label: str,
+                          kR: str, r_pairs: list[tuple[int, str]], *, lookup: bool = False):
+        valsA = [v for _, v in a_pairs]
+        valsR = [v for _, v in r_pairs]
+        target_map = {target_no: v for target_no, v in a_pairs}
+        if not kA or not kR or not valsA or not valsR or any(not v for v in valsA + valsR):
+            QMessageBox.warning(self, "提示", "请确认关联相同字段和目标数据都已选择")
+            return None
+        if len(target_map) != len(a_pairs):
+            QMessageBox.warning(self, "提示", "A表目标数据编号不能重复")
+            return None
+        ref_numbers = [target_no for target_no, _ in r_pairs]
+        if len(set(ref_numbers)) != len(ref_numbers):
+            QMessageBox.warning(self, "提示", f"{ref_label}表目标数据编号不能重复")
+            return None
+        missing_numbers = [target_no for target_no in ref_numbers if target_no not in target_map]
+        if missing_numbers:
+            QMessageBox.warning(self, "提示", f"{ref_label}表包含A表不存在的目标数据编号：{missing_numbers}")
+            return None
+        if lookup and len(set(valsA)) != len(valsA):
+            QMessageBox.warning(self, "提示", "查询模式下 A 表目标数据不能重复，否则回填列会冲突")
+            return None
+        return [(target_no, target_map[target_no], val) for target_no, val in r_pairs]
+
+    def _validate_reference_allocations(self, refs: list[tuple[str, pd.DataFrame, str, list[tuple[int, str]], str]]) -> bool:
+        owners = {}
+        for ref_label, _, _, r_pairs, _ in refs:
+            for target_no, _ in r_pairs:
+                owners.setdefault(target_no, []).append(ref_label)
+        duplicates = {target_no: labels for target_no, labels in owners.items() if len(labels) > 1}
+        if duplicates:
+            detail = "；".join(f"目标数据{target_no}: {','.join(labels)}" for target_no, labels in duplicates.items())
+            QMessageBox.warning(self, "提示", f"多个参考表不能占用同一个目标数据编号：{detail}")
+            return False
+        return True
+
     def _run_check(self):
         try:
-            dfA, kA, vA, aggA = self.sideA.get_data()
-            dfB, kB, vB, aggB = self.sideB.get_data()
+            dfA, kA, a_pairs, aggA = self.sideA.get_target_data()
+            refs = []
+            for ref_idx, side in enumerate(self.ref_sides):
+                ref_label = _table_letter(ref_idx + 1)
+                dfR, kR, r_pairs, aggR = side.get_target_data()
+                refs.append((ref_label, dfR, kR, r_pairs, aggR))
         except Exception as e:
             QMessageBox.critical(self, "错误", f"读取失败：{e}")
             return
-        if not kA or not vA or not kB or not vB:
-            QMessageBox.warning(self, "提示", "请确认关联相同字段和目标数据都已选择")
+        if not refs:
+            QMessageBox.warning(self, "提示", "请至少添加一个参考表")
+            return
+        if not self._validate_reference_allocations(refs):
             return
         tol = self.sp_tol.value() / 100.0
         norm = self.cb_norm.isChecked()
 
         A = dfA[dfA[kA].notna()].copy()
-        B = dfB[dfB[kB].notna()].copy()
         A["__k"] = A[kA].map(_norm_id) if norm else A[kA]
-        B["__k"] = B[kB].map(_norm_id) if norm else B[kB]
-        A["__v"] = A[vA].map(_to_num)
-        B["__v"] = B[vB].map(_to_num)
-        Ag = A.groupby("__k", as_index=False).agg(A值=("__v", aggA))
-        Bg = B.groupby("__k", as_index=False).agg(B值=("__v", aggB))
-        m = Ag.merge(Bg, on="__k", how="outer", indicator=True)
-        m["A值"] = m["A值"].fillna(0).round(2); m["B值"] = m["B值"].fillna(0).round(2)
-        m["差额(A-B)"] = (m["A值"] - m["B值"]).round(2)
+        full_parts = []
+        summary_rows = [("全部", "参考表数量", len(refs)), ("全部", "A表行数", len(A))]
 
-        def cls(r):
-            if r["_merge"] == "left_only":
-                return "仅A有"
-            if r["_merge"] == "right_only":
-                return "仅B有(A遗漏)"
-            return "一致" if abs(r["差额(A-B)"]) <= tol else "金额不一致"
-        m["核对状态"] = m.apply(cls, axis=1)
-        m = m.drop(columns=["_merge"]).rename(columns={"__k": "键值"})
+        for ref_label, dfR, kR, r_pairs, aggR in refs:
+            target_pairs = self._validate_targets(kA, a_pairs, ref_label, kR, r_pairs)
+            if not target_pairs:
+                return
+            R = dfR[dfR[kR].notna()].copy()
+            R["__k"] = R[kR].map(_norm_id) if norm else R[kR]
+            agg_a = {}
+            agg_r = {}
+            diff_cols = []
+            target_labels = {}
+            for target_no, vA, vR in target_pairs:
+                a_src = f"__vA_{target_no}"
+                r_src = f"__vR_{target_no}"
+                a_col = f"目标数据{target_no}-A值"
+                r_col = f"目标数据{target_no}-{ref_label}值"
+                diff_col = f"目标数据{target_no}-差额(A-{ref_label})"
+                A[a_src] = A[vA].map(_to_num)
+                R[r_src] = R[vR].map(_to_num)
+                agg_a[a_col] = (a_src, aggA)
+                agg_r[r_col] = (r_src, aggR)
+                diff_cols.append((target_no, a_col, r_col, diff_col, vA, vR))
+                target_labels[diff_col] = f"目标数据{target_no}"
+            Ag = A.groupby("__k", as_index=False).agg(**agg_a)
+            Rg = R.groupby("__k", as_index=False).agg(**agg_r)
+            m = Ag.merge(Rg, on="__k", how="outer", indicator=True)
+            for _, a_col, r_col, diff_col, _, _ in diff_cols:
+                m[a_col] = m[a_col].fillna(0).round(2)
+                m[r_col] = m[r_col].fillna(0).round(2)
+                m[diff_col] = (m[a_col] - m[r_col]).round(2)
 
-        cnt = m["核对状态"].value_counts().to_dict()
-        summary = pd.DataFrame({
-            "指标": ["合集", "一致", "金额不一致", "仅A有", "仅B有(A遗漏)",
-                     "A合计", "B合计", "差额合计", f"A表({aggA})行数", f"B表({aggB})行数"],
-            "值": [len(m), cnt.get("一致", 0), cnt.get("金额不一致", 0),
-                   cnt.get("仅A有", 0), cnt.get("仅B有(A遗漏)", 0),
-                   round(m["A值"].sum(), 2), round(m["B值"].sum(), 2),
-                   round(m["差额(A-B)"].sum(), 2), len(A), len(B)],
-        })
-        diff = m[m["核对状态"] != "一致"].reset_index(drop=True)
-        self._summary, self._diff, self._full = summary, diff, m
+            def cls(r):
+                if r["_merge"] == "left_only":
+                    return "仅A有"
+                if r["_merge"] == "right_only":
+                    return f"仅{ref_label}有(A遗漏)"
+                return "一致" if all(abs(r[diff_col]) <= tol for _, _, _, diff_col, _, _ in diff_cols) else "金额不一致"
+            m["核对状态"] = m.apply(cls, axis=1)
+            m["不一致目标"] = m.apply(
+                lambda r: "" if r["核对状态"] != "金额不一致" else "、".join(
+                    target_labels[diff_col] for _, _, _, diff_col, _, _ in diff_cols if abs(r[diff_col]) > tol
+                ),
+                axis=1,
+            )
+            m = m.drop(columns=["_merge"]).rename(columns={"__k": "键值"})
+            m.insert(0, "参考表", ref_label)
+            full_parts.append(m)
+
+            cnt = m["核对状态"].value_counts().to_dict()
+            summary_rows.extend([
+                (ref_label, "目标数据组数", len(target_pairs)),
+                (ref_label, "合集", len(m)),
+                (ref_label, "一致", cnt.get("一致", 0)),
+                (ref_label, "金额不一致", cnt.get("金额不一致", 0)),
+                (ref_label, "仅A有", cnt.get("仅A有", 0)),
+                (ref_label, f"仅{ref_label}有(A遗漏)", cnt.get(f"仅{ref_label}有(A遗漏)", 0)),
+                (ref_label, f"A表({aggA})行数", len(A)),
+                (ref_label, f"{ref_label}表({aggR})行数", len(R)),
+            ])
+            for idx, a_col, r_col, diff_col, vA, vR in diff_cols:
+                summary_rows.extend([
+                    (ref_label, f"目标数据{idx} A列", vA),
+                    (ref_label, f"目标数据{idx} {ref_label}列", vR),
+                    (ref_label, f"目标数据{idx} A合计", round(m[a_col].sum(), 2)),
+                    (ref_label, f"目标数据{idx} {ref_label}合计", round(m[r_col].sum(), 2)),
+                    (ref_label, f"目标数据{idx} 差额合计", round(m[diff_col].sum(), 2)),
+                ])
+
+        m_all = pd.concat(full_parts, ignore_index=True) if full_parts else pd.DataFrame()
+        summary = pd.DataFrame(summary_rows, columns=["参考表", "指标", "值"])
+        diff = m_all[m_all["核对状态"] != "一致"].reset_index(drop=True)
+        self._summary, self._diff, self._full = summary, diff, m_all
         self._lookup = None
+        cnt_all = m_all["核对状态"].value_counts().to_dict()
         self.result_info.setText(
-            f"✓ 合集 {len(m)} | 一致 {cnt.get('一致',0)} | 不一致 {cnt.get('金额不一致',0)}"
-            f" | 仅A {cnt.get('仅A有',0)} | 仅B {cnt.get('仅B有(A遗漏)',0)}"
+            f"✓ 参考表 {len(refs)} 个 | 对比记录 {len(m_all)} | 一致 {cnt_all.get('一致',0)}"
+            f" | 不一致 {cnt_all.get('金额不一致',0)} | 仅A {cnt_all.get('仅A有',0)}"
         )
         for b in (self.btn_show_sum, self.btn_show_diff, self.btn_show_all, self.btn_save):
             b.setEnabled(True)
         self._show("sum")
 
     def _run_lookup(self):
-        """查询模式：B 表的目标数据 → 按关联字段回填到 A 表的目标数据列
+        """查询模式：多个参考表的目标数据 → 按关联字段回填到 A 表的目标数据列
         不修改原A表；输出A表副本。"""
         try:
-            dfA, kA, vA, aggA = self.sideA.get_data()
-            dfB, kB, vB, aggB = self.sideB.get_data()
+            dfA, kA, a_pairs, aggA = self.sideA.get_target_data()
+            refs = []
+            for ref_idx, side in enumerate(self.ref_sides):
+                ref_label = _table_letter(ref_idx + 1)
+                dfR, kR, r_pairs, aggR = side.get_target_data()
+                refs.append((ref_label, dfR, kR, r_pairs, aggR))
         except Exception as e:
             QMessageBox.critical(self, "错误", f"读取失败：{e}")
             return
-        if not kA or not vA or not kB or not vB:
-            QMessageBox.warning(self, "提示", "请确认关联相同字段和目标数据都已选择")
+        if not refs:
+            QMessageBox.warning(self, "提示", "请至少添加一个参考表")
+            return
+        if not self._validate_reference_allocations(refs):
             return
         norm = self.cb_norm.isChecked()
 
         A = dfA.copy()
-        B = dfB[dfB[kB].notna()].copy()
         A["__k"] = A[kA].map(_norm_id) if norm else A[kA]
-        B["__k"] = B[kB].map(_norm_id) if norm else B[kB]
-        # B 按关联字段聚合 + 保留来源数据值（多条用 | 分隔）
-        B["__v"] = B[vB].map(_to_num)
+        valsA = [v for _, v in a_pairs]
+        if len(set(valsA)) != len(valsA):
+            QMessageBox.warning(self, "提示", "查询模式下 A 表目标数据不能重复，否则回填列会冲突")
+            return
+
+        # 参考表按关联字段聚合 + 保留来源数据值（多条用 | 分隔）
         def _list_vals(s):
             items = []
             for v in s.dropna():
@@ -838,61 +1145,114 @@ class CrossTableCheckDialog(QDialog):
                 else:
                     items.append(str(v))
             return " | ".join(items)
-        Bg = B.groupby("__k", as_index=False).agg(
-            __查询值=("__v", aggB),
-            __B来源记录数=("__k", "count"),
-            __B来源数据值=(vB, _list_vals),
-        )
 
-        merged = A.merge(Bg, on="__k", how="left")
+        merged = A.copy()
+        pair_meta_by_target: dict[int, list[tuple[str, str, str, str]]] = {}
+        source_cols = []
+        record_cols = []
+        ref_match_rows = []
+        for ref_label, dfR, kR, r_pairs, aggR in refs:
+            target_pairs = self._validate_targets(kA, a_pairs, ref_label, kR, r_pairs, lookup=True)
+            if not target_pairs:
+                return
+            R = dfR[dfR[kR].notna()].copy()
+            R["__k"] = R[kR].map(_norm_id) if norm else R[kR]
+            record_col = f"__{ref_label}来源记录数"
+            agg_spec = {record_col: ("__k", "count")}
+            for target_no, vA, vR in target_pairs:
+                value_col = f"__{ref_label}查询值{target_no}"
+                source_col = f"__{ref_label}来源数据值{target_no}"
+                R[value_col] = R[vR].map(_to_num)
+                agg_spec[value_col] = (value_col, aggR)
+                agg_spec[source_col] = (vR, _list_vals)
+                pair_meta_by_target.setdefault(target_no, []).append((ref_label, vR, value_col, source_col))
+                source_cols.append((ref_label, target_no, source_col))
+            Rg = R.groupby("__k", as_index=False).agg(**agg_spec)
+            merged = merged.merge(Rg, on="__k", how="left")
+            record_cols.append((ref_label, record_col))
+            ref_match_rows.append((ref_label, aggR, record_col))
+
         # 标识匹配
-        merged["匹配状态"] = merged["__查询值"].apply(
-            lambda x: "未匹配" if pd.isna(x) else "已匹配"
+        def _matched_refs(row):
+            names = [
+                ref_label for ref_label, record_col in record_cols
+                if pd.notna(row[record_col]) and row[record_col] > 0
+            ]
+            return "、".join(names)
+
+        merged["匹配参考表"] = merged.apply(_matched_refs, axis=1)
+        merged["匹配状态"] = merged["匹配参考表"].apply(
+            lambda x: "未匹配" if not x else "已匹配"
         )
         # 保留A原值作对比
-        orig_col = f"{vA}_原值"
-        merged[orig_col] = merged[vA]
-        # 回填：A 的目标列 <- 查询值（未匹配保留原值）
-        merged[vA] = merged["__查询值"].where(merged["__查询值"].notna(), merged[orig_col])
+        orig_cols = []
+        for target_no, vA in a_pairs:
+            orig_col = f"{vA}_原值" if len(a_pairs) == 1 else f"{vA}_原值(目标数据{target_no})"
+            merged[orig_col] = merged[vA]
+            fill_values = None
+            for _, _, value_col, _ in pair_meta_by_target.get(target_no, []):
+                fill_values = merged[value_col] if fill_values is None else fill_values.combine_first(merged[value_col])
+            if fill_values is not None:
+                # 回填：A 的目标列 <- 第一个有值的参考表查询值（未匹配保留原值）
+                merged[vA] = fill_values.where(fill_values.notna(), merged[orig_col])
+            orig_cols.append(orig_col)
         # 整理输出列：保留A原有列 + 原值列 + B来源数据值 + B来源记录数 + 匹配状态
+        source_out_cols = []
+        rename_cols = {}
+        for ref_label, target_no, source_col in source_cols:
+            out_source_col = f"{ref_label}_来源数据值" if len(a_pairs) == 1 else f"{ref_label}_来源数据值(目标数据{target_no})"
+            source_out_cols.append(source_col)
+            rename_cols[source_col] = out_source_col
+        record_out_cols = []
+        for ref_label, record_col in record_cols:
+            record_out_cols.append(record_col)
+            rename_cols[record_col] = f"{ref_label}_来源记录数"
         out_cols = (
             [c for c in A.columns if c != "__k"]
-            + [orig_col, "__B来源数据值", "__B来源记录数", "匹配状态"]
+            + orig_cols
+            + source_out_cols
+            + record_out_cols
+            + ["匹配参考表", "匹配状态"]
         )
-        out = merged[out_cols].rename(columns={
-            "__B来源数据值": "B_来源数据值",
-            "__B来源记录数": "B_来源记录数",
-        })
+        out = merged[out_cols].rename(columns=rename_cols)
         # 四舍五入数值
-        if pd.api.types.is_numeric_dtype(out[vA]):
-            out[vA] = out[vA].round(2)
+        for vA in valsA:
+            if pd.api.types.is_numeric_dtype(out[vA]):
+                out[vA] = out[vA].round(2)
 
         matched = (out["匹配状态"] == "已匹配").sum()
         total = len(out)
         # 汇总
-        summary = pd.DataFrame({
-            "指标": [
-                "A表总行数", "已匹配(B有数据)", "未匹配(B无数据)",
-                f"A原『{vA}』合计", f"回填后『{vA}』合计", "变化量",
-                "B聚合方式", "关联字段(A→B)",
-            ],
-            "值": [
-                total, int(matched), int(total - matched),
-                round(pd.to_numeric(out[orig_col], errors="coerce").fillna(0).sum(), 2),
-                round(pd.to_numeric(out[vA], errors="coerce").fillna(0).sum(), 2),
-                round(
-                    pd.to_numeric(out[vA], errors="coerce").fillna(0).sum()
-                    - pd.to_numeric(out[orig_col], errors="coerce").fillna(0).sum(), 2
-                ),
-                aggB, f"{kA} ↔ {kB}",
-            ],
-        })
+        summary_rows = [
+            ("全部", "参考表数量", len(refs)),
+            ("全部", "A表目标数据组数", len(a_pairs)),
+            ("全部", "A表总行数", total),
+            ("全部", "已匹配(任一参考表有数据)", int(matched)),
+            ("全部", "未匹配(所有参考表无数据)", int(total - matched)),
+        ]
+        for ref_label, aggR, record_col in ref_match_rows:
+            ref_matched = int((merged[record_col].fillna(0) > 0).sum())
+            summary_rows.extend([
+                (ref_label, f"{ref_label}聚合方式", aggR),
+                (ref_label, f"关联字段(A→{ref_label})", f"{kA} ↔ {next(k for label, _, k, _, _ in refs if label == ref_label)}"),
+                (ref_label, f"{ref_label}匹配行数", ref_matched),
+            ])
+        for (target_no, vA), orig_col in zip(a_pairs, orig_cols):
+            before = pd.to_numeric(out[orig_col], errors="coerce").fillna(0).sum()
+            after = pd.to_numeric(out[vA], errors="coerce").fillna(0).sum()
+            summary_rows.extend([
+                ("全部", f"目标数据{target_no} A列", vA),
+                ("全部", f"目标数据{target_no} A原合计", round(before, 2)),
+                ("全部", f"目标数据{target_no} 回填后合计", round(after, 2)),
+                ("全部", f"目标数据{target_no} 变化量", round(after - before, 2)),
+            ])
+        summary = pd.DataFrame(summary_rows, columns=["参考表", "指标", "值"])
         self._lookup = out
         self._summary = summary
         self._diff = self._full = None
         self.result_info.setText(
             f"✓ A 表 {total} 行 | 已匹配 {matched} | 未匹配 {total - matched}  →  "
-            f"回填列『{vA}』，同时保留原值列『{orig_col}』"
+            f"按 {len(refs)} 个参考表回填 {len(a_pairs)} 组目标数据，并保留对应原值列"
         )
         self.btn_show_lookup.setEnabled(True)
         self.btn_show_sum.setEnabled(True)
@@ -1164,11 +1524,11 @@ class MainWindow(QMainWindow):
             "   （sum/max/min/first/last/count/concat去重/mean，支持跳过）。\n\n"
             "② 跨表查询及核对\n"
             "   顶部先选模式：\n"
-            "     • 核对 — 比对 A/B 两表『目标数据』是否一致，输出差异报告。\n"
-            "     • 查询 — 从 B 表查目标数据回填到 A 表副本（不改原文件），\n"
-            "              附带『_原值 / B_来源数据值 / B_来源记录数 / 匹配状态』四列。\n"
-            "   A 表单 Sheet；B 表可勾选多个 Sheet 合并。\n"
-            "   两侧都支持过滤表达式（pandas query，如  金额>1000  或  部门=='教职工'）。\n\n"
+            "     • 核对 — 比对 A 表与一个或多个参考表的目标数据，输出差异报告。\n"
+            "     • 查询 — 从参考表查目标数据，回填到 A 表副本（不改原文件）。\n"
+            "   可点『添加参考表』增加 C/D... 表；参考表右上角可删除。\n"
+            "   目标数据可点 +/- 增减；编号以 A 表为准，参考表不能重复占用同一编号。\n"
+            "   A 表单 Sheet；参考表可多 Sheet 合并；两侧都支持过滤表达式。\n\n"
             "③ 带运算核对指定列\n"
             "   行内公式核对：实际值列 = X 列 [+ - × ÷] Y 列。\n"
             "   逐行用 X 与 Y 计算一个『应为』值，与『实际值列』比对，超差视为不一致。\n"
