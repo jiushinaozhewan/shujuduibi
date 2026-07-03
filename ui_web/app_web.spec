@@ -4,6 +4,13 @@
 产物：dist/跨表核对Web/
 """
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
+import os
+
+if os.environ.get("PYI_SKIP_WIN_RESOURCE_UPDATE") == "1":
+    from PyInstaller.building import api as pyi_api
+    pyi_api.winresource.remove_all_resources = lambda filename: None
+    pyi_api.winmanifest.write_manifest_to_executable = lambda filename, manifest: None
+    pyi_api.icon.CopyIcons = lambda filename, icons: None
 
 hidden = (
     collect_submodules("streamlit")
@@ -31,6 +38,7 @@ for pkg in [
         pass
 # 把 app.py 放进包内（启动器会从 _MEIPASS 读取）
 datas += [("app.py", ".")]
+datas += [("../cross_table_core.py", ".")]
 
 a = Analysis(
     ["launcher.py"],

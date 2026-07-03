@@ -15,8 +15,18 @@ st.set_page_config(page_title="跨表核对 · Web 版", layout="wide", page_ico
 import sys
 if getattr(sys, "frozen", False):
     DATA_DIR = Path(sys.executable).resolve().parent
+    CORE_DIR = Path(getattr(sys, "_MEIPASS", DATA_DIR))
 else:
-    DATA_DIR = Path(r"D:/meta/shujuduibi")
+    DATA_DIR = Path(__file__).resolve().parent.parent
+    CORE_DIR = DATA_DIR
+
+if str(CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(CORE_DIR))
+
+from cross_table_core import (
+    build_cross_check_results as core_build_cross_check_results,
+    build_cross_lookup_results as core_build_cross_lookup_results,
+)
 
 
 # ================ 通用工具 ================
@@ -291,199 +301,13 @@ def validate_reference_allocations(refs: list[tuple[str, pd.DataFrame, str, list
 def build_cross_check_results(dfA: pd.DataFrame, kA: str, a_pairs: list[tuple[int, str]], aggA: str,
                               refs: list[tuple[str, pd.DataFrame, str, list[tuple[int, str]], str]],
                               tol: float, norm: bool):
-    allocation_error = validate_reference_allocations(refs)
-    if allocation_error:
-        return None, None, None, allocation_error
-
-    A = dfA[dfA[kA].notna()].copy()
-    A["__k"] = A[kA].map(norm_id) if norm else A[kA]
-    full_parts = []
-    summary_rows = [("全部", "参考表数量", len(refs)), ("全部", "A表行数", len(A))]
-
-    for ref_label, dfR, kR, r_pairs, aggR in refs:
-        target_pairs, error = validate_targets(kA, a_pairs, ref_label, kR, r_pairs)
-        if error:
-            return None, None, None, error
-        R = dfR[dfR[kR].notna()].copy()
-        R["__k"] = R[kR].map(norm_id) if norm else R[kR]
-        agg_a = {}
-        agg_r = {}
-        diff_cols = []
-        target_labels = {}
-        for target_no, vA, vR in target_pairs:
-            a_src = f"__vA_{target_no}"
-            r_src = f"__vR_{target_no}"
-            a_col = f"目标数据{target_no}-A值"
-            r_col = f"目标数据{target_no}-{ref_label}值"
-            diff_col = f"目标数据{target_no}-差额(A-{ref_label})"
-            A[a_src] = A[vA].map(to_num)
-            R[r_src] = R[vR].map(to_num)
-            agg_a[a_col] = (a_src, aggA)
-            agg_r[r_col] = (r_src, aggR)
-            diff_cols.append((target_no, a_col, r_col, diff_col, vA, vR))
-            target_labels[diff_col] = f"目标数据{target_no}"
-        Ag = A.groupby("__k", as_index=False).agg(**agg_a)
-        Rg = R.groupby("__k", as_index=False).agg(**agg_r)
-        merged = Ag.merge(Rg, on="__k", how="outer", indicator=True)
-        for _, a_col, r_col, diff_col, _, _ in diff_cols:
-            merged[a_col] = merged[a_col].fillna(0).round(2)
-            merged[r_col] = merged[r_col].fillna(0).round(2)
-            merged[diff_col] = (merged[a_col] - merged[r_col]).round(2)
-
-        def cls(row):
-            if row["_merge"] == "left_only":
-                return "仅A有"
-            if row["_merge"] == "right_only":
-                return f"仅{ref_label}有(A遗漏)"
-            return "一致" if all(abs(row[diff_col]) <= tol for _, _, _, diff_col, _, _ in diff_cols) else "金额不一致"
-
-        merged["核对状态"] = merged.apply(cls, axis=1)
-        merged["不一致目标"] = merged.apply(
-            lambda row: "" if row["核对状态"] != "金额不一致" else "、".join(
-                target_labels[diff_col] for _, _, _, diff_col, _, _ in diff_cols if abs(row[diff_col]) > tol
-            ),
-            axis=1,
-        )
-        merged = merged.drop(columns=["_merge"]).rename(columns={"__k": "键值"})
-        merged.insert(0, "参考表", ref_label)
-        full_parts.append(merged)
-
-        cnt = merged["核对状态"].value_counts().to_dict()
-        summary_rows.extend([
-            (ref_label, "目标数据组数", len(target_pairs)),
-            (ref_label, "合集", len(merged)),
-            (ref_label, "一致", cnt.get("一致", 0)),
-            (ref_label, "金额不一致", cnt.get("金额不一致", 0)),
-            (ref_label, "仅A有", cnt.get("仅A有", 0)),
-            (ref_label, f"仅{ref_label}有(A遗漏)", cnt.get(f"仅{ref_label}有(A遗漏)", 0)),
-            (ref_label, f"A表({aggA})行数", len(A)),
-            (ref_label, f"{ref_label}表({aggR})行数", len(R)),
-        ])
-        for target_no, a_col, r_col, diff_col, vA, vR in diff_cols:
-            summary_rows.extend([
-                (ref_label, f"目标数据{target_no} A列", vA),
-                (ref_label, f"目标数据{target_no} {ref_label}列", vR),
-                (ref_label, f"目标数据{target_no} A合计", round(merged[a_col].sum(), 2)),
-                (ref_label, f"目标数据{target_no} {ref_label}合计", round(merged[r_col].sum(), 2)),
-                (ref_label, f"目标数据{target_no} 差额合计", round(merged[diff_col].sum(), 2)),
-            ])
-
-    full = pd.concat(full_parts, ignore_index=True) if full_parts else pd.DataFrame()
-    summary = pd.DataFrame(summary_rows, columns=["参考表", "指标", "值"])
-    diff = full[full["核对状态"] != "一致"].reset_index(drop=True)
-    return summary, diff, full, None
+    return core_build_cross_check_results(dfA, kA, a_pairs, aggA, refs, tol, norm)
 
 
 def build_cross_lookup_results(dfA: pd.DataFrame, kA: str, a_pairs: list[tuple[int, str]],
                                refs: list[tuple[str, pd.DataFrame, str, list[tuple[int, str]], str]],
                                norm: bool):
-    allocation_error = validate_reference_allocations(refs)
-    if allocation_error:
-        return None, None, allocation_error
-
-    A = dfA.copy()
-    A["__k"] = A[kA].map(norm_id) if norm else A[kA]
-    valsA = [v for _, v in a_pairs]
-    if len(set(valsA)) != len(valsA):
-        return None, None, "查询模式下 A 表目标数据不能重复，否则回填列会冲突。"
-
-    merged = A.copy()
-    pair_meta_by_target: dict[int, list[tuple[str, str, str, str]]] = {}
-    source_cols = []
-    record_cols = []
-    ref_match_rows = []
-
-    for ref_label, dfR, kR, r_pairs, aggR in refs:
-        target_pairs, error = validate_targets(kA, a_pairs, ref_label, kR, r_pairs, lookup=True)
-        if error:
-            return None, None, error
-        R = dfR[dfR[kR].notna()].copy()
-        R["__k"] = R[kR].map(norm_id) if norm else R[kR]
-        record_col = f"__{ref_label}来源记录数"
-        agg_spec = {record_col: ("__k", "count")}
-        for target_no, vA, vR in target_pairs:
-            value_col = f"__{ref_label}查询值{target_no}"
-            source_col = f"__{ref_label}来源数据值{target_no}"
-            R[value_col] = R[vR].map(to_num)
-            agg_spec[value_col] = (value_col, aggR)
-            agg_spec[source_col] = (vR, list_vals)
-            pair_meta_by_target.setdefault(target_no, []).append((ref_label, vR, value_col, source_col))
-            source_cols.append((ref_label, target_no, source_col))
-        Rg = R.groupby("__k", as_index=False).agg(**agg_spec)
-        merged = merged.merge(Rg, on="__k", how="left")
-        record_cols.append((ref_label, record_col))
-        ref_match_rows.append((ref_label, aggR, kR, record_col))
-
-    def matched_refs(row):
-        names = [
-            ref_label for ref_label, record_col in record_cols
-            if pd.notna(row[record_col]) and row[record_col] > 0
-        ]
-        return "、".join(names)
-
-    merged["匹配参考表"] = merged.apply(matched_refs, axis=1)
-    merged["匹配状态"] = merged["匹配参考表"].apply(lambda x: "未匹配" if not x else "已匹配")
-
-    orig_cols = []
-    for target_no, vA in a_pairs:
-        orig_col = f"{vA}_原值" if len(a_pairs) == 1 else f"{vA}_原值(目标数据{target_no})"
-        merged[orig_col] = merged[vA]
-        fill_values = None
-        for _, _, value_col, _ in pair_meta_by_target.get(target_no, []):
-            fill_values = merged[value_col] if fill_values is None else fill_values.combine_first(merged[value_col])
-        if fill_values is not None:
-            merged[vA] = fill_values.where(fill_values.notna(), merged[orig_col])
-        orig_cols.append(orig_col)
-
-    source_out_cols = []
-    rename_cols = {}
-    for ref_label, target_no, source_col in source_cols:
-        out_source_col = f"{ref_label}_来源数据值" if len(a_pairs) == 1 else f"{ref_label}_来源数据值(目标数据{target_no})"
-        source_out_cols.append(source_col)
-        rename_cols[source_col] = out_source_col
-    record_out_cols = []
-    for ref_label, record_col in record_cols:
-        record_out_cols.append(record_col)
-        rename_cols[record_col] = f"{ref_label}_来源记录数"
-    out_cols = (
-        [c for c in A.columns if c != "__k"]
-        + orig_cols
-        + source_out_cols
-        + record_out_cols
-        + ["匹配参考表", "匹配状态"]
-    )
-    out = merged[out_cols].rename(columns=rename_cols)
-    for vA in valsA:
-        if pd.api.types.is_numeric_dtype(out[vA]):
-            out[vA] = out[vA].round(2)
-
-    matched = int((out["匹配状态"] == "已匹配").sum())
-    total = len(out)
-    summary_rows = [
-        ("全部", "参考表数量", len(refs)),
-        ("全部", "A表目标数据组数", len(a_pairs)),
-        ("全部", "A表总行数", total),
-        ("全部", "已匹配(任一参考表有数据)", matched),
-        ("全部", "未匹配(所有参考表无数据)", total - matched),
-    ]
-    for ref_label, aggR, kR, record_col in ref_match_rows:
-        ref_matched = int((merged[record_col].fillna(0) > 0).sum())
-        summary_rows.extend([
-            (ref_label, f"{ref_label}聚合方式", aggR),
-            (ref_label, f"关联字段(A→{ref_label})", f"{kA} ↔ {kR}"),
-            (ref_label, f"{ref_label}匹配行数", ref_matched),
-        ])
-    for (target_no, vA), orig_col in zip(a_pairs, orig_cols):
-        before = pd.to_numeric(out[orig_col], errors="coerce").fillna(0).sum()
-        after = pd.to_numeric(out[vA], errors="coerce").fillna(0).sum()
-        summary_rows.extend([
-            ("全部", f"目标数据{target_no} A列", vA),
-            ("全部", f"目标数据{target_no} A原合计", round(before, 2)),
-            ("全部", f"目标数据{target_no} 回填后合计", round(after, 2)),
-            ("全部", f"目标数据{target_no} 变化量", round(after - before, 2)),
-        ])
-    summary = pd.DataFrame(summary_rows, columns=["参考表", "指标", "值"])
-    return out, summary, None
+    return core_build_cross_lookup_results(dfA, kA, a_pairs, refs, norm)
 
 
 # ================ 预设（与桌面版对齐） ================
@@ -891,7 +715,7 @@ with tab2:
     if st.button(run_label, type="primary", disabled=not can_run, key="ck_run"):
         dfA_filt, kA, a_pairs, aggA = a_config
         if is_check:
-            summary, diff, full, error = build_cross_check_results(dfA_filt, kA, a_pairs, aggA, refs, tol, norm)
+            summary, diff, full, error = core_build_cross_check_results(dfA_filt, kA, a_pairs, aggA, refs, tol, norm)
             if error:
                 st.warning(error)
             else:
@@ -899,7 +723,7 @@ with tab2:
                 k1, k2, k3, k4, k5 = st.columns(5)
                 k1.metric("参考表", len(refs))
                 k2.metric("一致", cnt.get("一致", 0))
-                k3.metric("不一致", cnt.get("金额不一致", 0))
+                k3.metric("不一致", cnt.get("金额不一致", 0) + cnt.get("值不一致", 0))
                 k4.metric("仅A有", cnt.get("仅A有", 0))
                 k5.metric("差异总数", len(diff))
                 st.dataframe(summary, use_container_width=True, hide_index=True)
@@ -914,7 +738,7 @@ with tab2:
                     key="ck_dl",
                 )
         else:
-            out, summary, error = build_cross_lookup_results(dfA_filt, kA, a_pairs, refs, norm)
+            out, summary, error = core_build_cross_lookup_results(dfA_filt, kA, a_pairs, refs, norm)
             if error:
                 st.warning(error)
             else:

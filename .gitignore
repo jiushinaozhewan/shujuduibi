@@ -27,6 +27,12 @@ build/
 dist/
 build_release/
 dist_release/
+build_*/
+dist_*/
+ui_desktop/build_*/
+ui_desktop/dist_*/
+ui_web/build_*/
+ui_web/dist_*/
 *.spec.bak
 *.manifest
 
